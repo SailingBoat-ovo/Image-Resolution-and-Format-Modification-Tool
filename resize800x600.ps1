@@ -57,12 +57,17 @@ param(
     [ValidateSet('stretch', 'cover', 'fit')]
     [string]$Mode = 'fit',
 
+    [ValidateSet('jpg', 'jpeg', 'png', 'bmp', 'gif', 'tiff', 'webp')]
+    [string]$Format = '',
+
+    [switch]$KeepSize,
+
     [string]$Suffix = '',
 
-    [ValidateRange(1, 10000)]
+    [ValidateRange(0, 10000)]
     [int]$Width = 800,
 
-    [ValidateRange(1, 10000)]
+    [ValidateRange(0, 10000)]
     [int]$Height = 600,
 
     [ValidateRange(1, 100)]
@@ -73,8 +78,8 @@ Set-StrictMode -Version Latest
 
 Add-Type -AssemblyName System.Drawing
 
-$ImageExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff')
-$script:ToolVersion = 'v2.3'
+$ImageExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.webp')
+$script:ToolVersion = 'v2.5'
 $script:ScriptDir = if ($env:RESIZE_TOOL_DIR) {
     $env:RESIZE_TOOL_DIR.TrimEnd('\')
 } elseif ($PSScriptRoot) {
@@ -315,6 +320,84 @@ function Resolve-ImageFiles {
     return @($result | Select-Object -Unique)
 }
 
+# ================================================================
+# WebP 支持（使用随附的 Google libwebp 官方工具 dwebp.exe / cwebp.exe）
+# ================================================================
+
+function Get-WebpTool {
+    param([string]$Name)
+    $candidates = @(
+        (Join-Path $script:ScriptDir ('tools\' + $Name)),
+        (Join-Path $script:ScriptDir $Name)
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+function Invoke-WebpTool {
+    param([string]$ToolPath, [string[]]$Arguments)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ToolPath
+    $psi.Arguments = $Arguments -join ' '
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = $proc.ExitCode
+        Stdout   = $stdout
+        Stderr   = $stderr
+    }
+}
+
+function Read-WebpImage {
+    param([string]$InputPath)
+    $dwebp = Get-WebpTool 'dwebp.exe'
+    if (-not $dwebp) {
+        throw 'WebP 解码需要随附的 dwebp.exe（Google libwebp 官方工具）。请把 dwebp.exe 放到脚本目录的 tools 文件夹中。'
+    }
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N') + '.png')
+    try {
+        $r = Invoke-WebpTool -ToolPath $dwebp -Arguments @('-quiet', ('"' + $InputPath + '"'), '-o', ('"' + $tmp + '"'))
+        if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tmp)) {
+            throw ('WebP 解码失败：' + $r.Stderr.Trim())
+        }
+        $img = [System.Drawing.Image]::FromFile($tmp)
+        $copy = New-Object System.Drawing.Bitmap $img
+        $img.Dispose()
+        return $copy
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Save-WebpImage {
+    param([System.Drawing.Image]$Image, [string]$OutPath, [int]$Quality)
+    $cwebp = Get-WebpTool 'cwebp.exe'
+    if (-not $cwebp) {
+        throw 'WebP 编码需要随附的 cwebp.exe（Google libwebp 官方工具）。请把 cwebp.exe 放到脚本目录的 tools 文件夹中。'
+    }
+    $q = [Math]::Max(0, [Math]::Min(100, $Quality))
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N') + '.png')
+    try {
+        $Image.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+        $r = Invoke-WebpTool -ToolPath $cwebp -Arguments @('-quiet', ('"' + $tmp + '"'), '-o', ('"' + $OutPath + '"'), '-q', $q.ToString())
+        if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $OutPath)) {
+            throw ('WebP 编码失败：' + $r.Stderr.Trim())
+        }
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Resize-OneImage {
     param(
         [string]$InputPath,
@@ -324,7 +407,9 @@ function Resize-OneImage {
         [string]$TargetOutDir,
         [string]$OutputName,
         [string]$NameSuffix,
-        [int]$JpegQuality
+        [int]$JpegQuality,
+        [string]$OutputFormat = '',
+        [switch]$KeepSize
     )
 
     $result = [pscustomobject]@{
@@ -340,25 +425,40 @@ function Resize-OneImage {
     $dst = $null
     $g = $null
     try {
-        $src = [System.Drawing.Image]::FromFile($InputPath)
-        Invoke-ExifOrientation $src
+        $inputExt = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
+        if ($inputExt -eq '.webp') {
+            $src = Read-WebpImage -InputPath $InputPath
+        } else {
+            $src = [System.Drawing.Image]::FromFile($InputPath)
+            Invoke-ExifOrientation $src
+        }
         $srcW = $src.Width
         $srcH = $src.Height
         if ($srcW -lt 1 -or $srcH -lt 1) { throw '图片尺寸无效' }
 
-        $suffix = if ($NameSuffix) { $NameSuffix } else { "_${TargetWidth}x${TargetHeight}" }
+        if ($KeepSize) {
+            $TargetWidth = $srcW
+            $TargetHeight = $srcH
+        }
+
+        $suffix = if ($NameSuffix) { $NameSuffix } elseif ($KeepSize) { '' } else { "_${TargetWidth}x${TargetHeight}" }
         $srcDir = Split-Path -Parent $InputPath
         $baseName = [System.IO.Path]::GetFileNameWithoutExtension($InputPath)
         $ext = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
+        $outExt = if ($OutputFormat) { '.' + $OutputFormat.TrimStart('.') } else { $ext }
 
         $finalOutDir = if ($TargetOutDir) { $TargetOutDir } else { $srcDir }
         if (-not (Test-Path -LiteralPath $finalOutDir)) {
             New-Item -ItemType Directory -Path $finalOutDir | Out-Null
         }
         $outPath = if ($OutputName) {
-            Join-Path $finalOutDir $OutputName
+            if ([System.IO.Path]::IsPathRooted($OutputName)) {
+                $OutputName
+            } else {
+                Join-Path $finalOutDir $OutputName
+            }
         } else {
-            Join-Path $finalOutDir ($baseName + $suffix + $ext)
+            Join-Path $finalOutDir ($baseName + $suffix + $outExt)
         }
         if ([System.IO.Path]::GetFullPath($outPath) -eq [System.IO.Path]::GetFullPath($InputPath)) {
             throw '输出路径与输入路径相同，请使用 -OutDir 或 -Out 指定其他位置。'
@@ -401,7 +501,9 @@ function Resize-OneImage {
         }
 
         $outExt = [System.IO.Path]::GetExtension($outPath).ToLowerInvariant()
-        if ($outExt -in '.jpg', '.jpeg') {
+        if ($outExt -eq '.webp') {
+            Save-WebpImage -Image $dst -OutPath $outPath -Quality $JpegQuality
+        } elseif ($outExt -in '.jpg', '.jpeg') {
             $codec = @([System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' })[0]
             $ep = [System.Drawing.Imaging.EncoderParameters]::new(1)
             $ep.Param[0] = [System.Drawing.Imaging.EncoderParameter]::new([System.Drawing.Imaging.Encoder]::Quality, [long]$JpegQuality)
@@ -444,7 +546,9 @@ function Invoke-ResizeImages {
         [string]$TargetOutDir,
         [string]$OutputName,
         [string]$NameSuffix,
-        [int]$JpegQuality
+        [int]$JpegQuality,
+        [string]$OutputFormat = '',
+        [switch]$KeepSize
     )
 
     if ($Files.Count -eq 0) {
@@ -459,7 +563,7 @@ function Invoke-ResizeImages {
     $done = 0
     $failed = 0
     foreach ($inputPath in $Files) {
-        $r = Resize-OneImage -InputPath $inputPath -TargetWidth $TargetWidth -TargetHeight $TargetHeight -ResizeMode $ResizeMode -TargetOutDir $TargetOutDir -OutputName $OutputName -NameSuffix $NameSuffix -JpegQuality $JpegQuality
+        $r = Resize-OneImage -InputPath $inputPath -TargetWidth $TargetWidth -TargetHeight $TargetHeight -ResizeMode $ResizeMode -TargetOutDir $TargetOutDir -OutputName $OutputName -NameSuffix $NameSuffix -JpegQuality $JpegQuality -OutputFormat $OutputFormat -KeepSize:$KeepSize
         if ($r.OK) {
             Write-Host "已生成: $($r.OutPath) ($($r.OutWidth)x$($r.OutHeight))" -ForegroundColor Green
             $done++
@@ -484,10 +588,10 @@ function Read-IntOrDefault {
         $answer = Read-Host $Prompt
         if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
         $value = 0
-        if ([int]::TryParse($answer, [ref]$value) -and $value -ge 1 -and $value -le 10000) {
+        if ([int]::TryParse($answer, [ref]$value) -and $value -ge 0 -and $value -le 10000) {
             return $value
         }
-        Write-Host '请输入 1 到 10000 之间的整数。' -ForegroundColor Yellow
+        Write-Host '请输入 0 到 10000 之间的整数（0 = 原分辨率）。' -ForegroundColor Yellow
     }
 }
 
@@ -505,6 +609,27 @@ function Read-ResizeMode {
             '2'     { return 'cover' }
             '3'     { return 'stretch' }
             default { Write-Host '请输入 1、2 或 3。' -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Read-OutputFormat {
+    Write-Host ''
+    Write-Host '输出格式（可把任意支持格式转成目标格式）：'
+    Write-Host '  0) 保持原格式'
+    Write-Host '  1) JPG   2) PNG   3) BMP   4) GIF   5) TIFF   6) WEBP'
+    while ($true) {
+        $answer = Read-Host '请输入 0 到 6 [默认 0 = 保持原格式]'
+        switch ($answer) {
+            ''  { return '' }
+            '0' { return '' }
+            '1' { return 'jpg' }
+            '2' { return 'png' }
+            '3' { return 'bmp' }
+            '4' { return 'gif' }
+            '5' { return 'tiff' }
+            '6' { return 'webp' }
+            default { Write-Host '请输入 0 到 6。' -ForegroundColor Yellow }
         }
     }
 }
@@ -534,7 +659,7 @@ function Show-SimpleMenu {
                     }
             )
         } else {
-            $tokens = @('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif', '*.tif', '*.tiff')
+            $tokens = @('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif', '*.tif', '*.tiff', '*.webp')
         }
 
         $files = @(Resolve-ImageFiles -RawPaths $tokens)
@@ -546,9 +671,13 @@ function Show-SimpleMenu {
         Write-Host "找到 $($files.Count) 个文件：" -ForegroundColor Green
         $files | ForEach-Object { Write-Host "  $_" }
 
-        $targetWidth = Read-IntOrDefault "目标宽度 [默认 $Width]" $Width
-        $targetHeight = Read-IntOrDefault "目标高度 [默认 $Height]" $Height
+        $targetWidth = Read-IntOrDefault "目标宽度 [默认 $Width，0=原分辨率]" $Width
+        $targetHeight = Read-IntOrDefault "目标高度 [默认 $Height，0=原分辨率]" $Height
         $resizeMode = Read-ResizeMode
+        $outputFormat = Read-OutputFormat
+        $keepSizeAnswer = Read-Host '保持原分辨率，只转格式不缩放？(Y/N，默认 N)'
+        $keepSize = $keepSizeAnswer -match '^[yY]'
+        if ($targetWidth -eq 0 -or $targetHeight -eq 0) { $keepSize = $true }
         $outDir = Read-Host '输出目录（回车 = 与原图同目录）'
         if ([string]::IsNullOrWhiteSpace($outDir)) { $outDir = '' }
 
@@ -558,14 +687,17 @@ function Show-SimpleMenu {
             'fit'     { '不拉伸 · 居中留白' }
         }
         Write-Host ''
-        Write-Host "即将处理：$($files.Count) 张图片 → ${targetWidth}x${targetHeight}，方式：$modeLabel" -ForegroundColor Yellow
+        $formatText = if ($outputFormat) { $outputFormat.ToUpperInvariant() } else { '原格式' }
+        $sizeText = if ($keepSize) { '原分辨率' } else { "${targetWidth}x${targetHeight}" }
+        Write-Host "即将处理：$($files.Count) 张图片 → $sizeText，方式：$modeLabel，输出：$formatText" -ForegroundColor Yellow
         $confirm = Read-Host '确认开始？(Y/N)'
         if ($confirm -notmatch '^[yY]') { continue }
 
         $total = $files.Count
         $okCount = 0
         for ($i = 0; $i -lt $total; $i++) {
-            $r = Resize-OneImage -InputPath $files[$i] -TargetWidth $targetWidth -TargetHeight $targetHeight -ResizeMode $resizeMode -TargetOutDir $outDir -OutputName '' -NameSuffix "_${targetWidth}x${targetHeight}" -JpegQuality $Quality
+            $suffix = if ($keepSize) { '' } else { "_${targetWidth}x${targetHeight}" }
+            $r = Resize-OneImage -InputPath $files[$i] -TargetWidth $targetWidth -TargetHeight $targetHeight -ResizeMode $resizeMode -TargetOutDir $outDir -OutputName '' -NameSuffix $suffix -JpegQuality $Quality -OutputFormat $outputFormat -KeepSize:$keepSize
             $pct = [Math]::Round((($i + 1) / $total) * 100)
             $filled = [Math]::Floor($pct / 5)
             $bar = ('█' * $filled) + ('░' * (20 - $filled))
@@ -593,6 +725,8 @@ function Show-SimpleMenu {
 
 $ModeLabels = @('居中留白·推荐', '居中裁剪·不变形', '拉伸·会变形')
 $ModeNames = @('fit', 'cover', 'stretch')
+$FormatLabels = @('原格式', 'JPG', 'PNG', 'BMP', 'GIF', 'TIFF', 'WEBP')
+$FormatValues = @('', 'jpg', 'png', 'bmp', 'gif', 'tiff', 'webp')
 
 function Render-Tui {
     Reset-TuiGrid
@@ -601,7 +735,7 @@ function Render-Tui {
     # ---- 标题区 ----
     Draw-TuiBox 0 0 80 4 (' 图片分辨率修改工具 ' + $script:ToolVersion + ' ') Cyan
     Write-TuiText 2 1 (Pad-Display ('图片分辨率修改工具 ' + $script:ToolVersion) 76) White
-    Write-TuiText 2 2 (Pad-Display '将图片调整为目标分辨率 · 作者：FANCHUAN · 输出不会覆盖原图' 76) DarkCyan
+    Write-TuiText 2 2 (Pad-Display '调整分辨率或转换格式 · 作者：FANCHUAN · 输出不会覆盖原图' 76) DarkCyan
 
     # ---- 文件列表 ----
     $filesActive = ($u.Field -eq 0)
@@ -625,17 +759,24 @@ function Render-Tui {
     Write-TuiText 2 12 '  [A] 添加图片    [X] 清空列表' Yellow
 
     # ---- 处理设置 ----
-    Draw-TuiBox 0 14 80 6 ' 处理设置 ' Cyan
+    Draw-TuiBox 0 14 80 7 ' 处理设置 ' Cyan
 
     Write-TuiText 2 15 '目标分辨率' White
-    if ($u.Field -eq 1) { Write-TuiText 12 15 '▶' Yellow }
-    Write-TuiText 14 15 '宽度 [ ' Gray
-    Write-TuiText 22 15 $u.WidthText ($(if ($u.Field -eq 1) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
-    Write-TuiText (22 + $u.WidthText.Length) 15 ' ]' Gray
-    if ($u.Field -eq 2) { Write-TuiText 34 15 '▶' Yellow }
-    Write-TuiText 36 15 '高度 [ ' Gray
-    Write-TuiText 44 15 $u.HeightText ($(if ($u.Field -eq 2) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
-    Write-TuiText (44 + $u.HeightText.Length) 15 ' ]' Gray
+    if ($u.KeepSize) {
+        $sizeActive = ($u.Field -eq 1 -or $u.Field -eq 2)
+        if ($sizeActive) { Write-TuiText 12 15 '▶' Yellow }
+        $sizeColor = if ($sizeActive) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green }
+        Write-TuiText 14 15 '原分辨率（不缩放）' $sizeColor
+    } else {
+        if ($u.Field -eq 1) { Write-TuiText 12 15 '▶' Yellow }
+        Write-TuiText 14 15 '宽度 [ ' Gray
+        Write-TuiText 22 15 $u.WidthText ($(if ($u.Field -eq 1) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
+        Write-TuiText (22 + $u.WidthText.Length) 15 ' ]' Gray
+        if ($u.Field -eq 2) { Write-TuiText 34 15 '▶' Yellow }
+        Write-TuiText 36 15 '高度 [ ' Gray
+        Write-TuiText 44 15 $u.HeightText ($(if ($u.Field -eq 2) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
+        Write-TuiText (44 + $u.HeightText.Length) 15 ' ]' Gray
+    }
 
     Write-TuiText 2 16 '缩放方式' White
     if ($u.Field -eq 3) { Write-TuiText 12 16 '▶' Yellow }
@@ -646,34 +787,45 @@ function Render-Tui {
         Write-TuiText (14 + $m * 22) 16 $label $color
     }
 
-    Write-TuiText 2 17 '输出目录' White
+    Write-TuiText 2 17 '输出格式' White
     if ($u.Field -eq 4) { Write-TuiText 12 17 '▶' Yellow }
     Write-TuiText 14 17 '[' Gray
+    $formatLabel = $FormatLabels[$u.OutFormatIndex]
+    Write-TuiText 16 17 $formatLabel ($(if ($u.Field -eq 4) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
+    Write-TuiText (16 + (Get-DisplayWidth $formatLabel)) 17 ' ]' Gray
+    Write-TuiText 32 17 'K 原分辨率:' DarkGray
+    $keepText = if ($u.KeepSize) { '开' } else { '关' }
+    $keepColor = if ($u.KeepSize) { [ConsoleColor]::Green } else { [ConsoleColor]::DarkGray }
+    Write-TuiText 46 17 $keepText $keepColor
+
+    Write-TuiText 2 18 '输出目录' White
+    if ($u.Field -eq 5) { Write-TuiText 12 18 '▶' Yellow }
+    Write-TuiText 14 18 '[' Gray
     if ($u.OutDir) {
         $dirText = Truncate-Display $u.OutDir 58
-        Write-TuiText 16 17 $dirText ($(if ($u.Field -eq 4) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
-        Write-TuiText (16 + (Get-DisplayWidth $dirText)) 17 ']' Gray
+        Write-TuiText 16 18 $dirText ($(if ($u.Field -eq 5) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }))
+        Write-TuiText (16 + (Get-DisplayWidth $dirText)) 18 ']' Gray
     } else {
-        Write-TuiText 16 17 (Pad-Display '默认与原图相同' 58) ($(if ($u.Field -eq 4) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray }))
-        Write-TuiText 74 17 ']' Gray
+        Write-TuiText 16 18 (Pad-Display '默认与原图相同' 58) ($(if ($u.Field -eq 5) { [ConsoleColor]::Yellow } else { [ConsoleColor]::DarkGray }))
+        Write-TuiText 74 18 ']' Gray
     }
 
-    Write-TuiText 2 18 '操作  ↑↓ 切换项目 · Enter 编辑 · 1/2/3 或 ←→ 选模式 · S 开始 · Q 退出' DarkGray
+    Write-TuiText 2 19 '操作  ↑↓ 切换 · Enter 编辑 · ←→ 选模式/格式 · K 原分辨率 · S 开始 · Q 退出' DarkGray
 
     # ---- 状态与动作 ----
     if ($u.Status) {
-        Write-TuiText 2 20 ('  ' + $u.Status) Green
+        Write-TuiText 2 21 ('  ' + $u.Status) Green
     }
     if ($u.Editing) {
-        Write-TuiText 2 21 (' ' * 76) Black
+        Write-TuiText 2 22 (' ' * 76) Black
         $prompt = $u.InputPrompt
         $line = $prompt + '： ' + $u.InputBuffer
         if ((Get-DisplayWidth $line) -gt 74) { $line = Truncate-Display $line 74 }
-        Write-TuiText 2 21 $line Yellow
+        Write-TuiText 2 22 $line Yellow
         $cx = 2 + (Get-DisplayWidth ($prompt + '： ' + $u.InputBuffer))
-        if ($cx -lt 78) { Write-TuiText $cx 21 '▌' White }
+        if ($cx -lt 78) { Write-TuiText $cx 22 '▌' White }
     } else {
-        Write-TuiText 2 21 '  [S] 开始处理  [A] 添加  [X] 清空  [F1] 诊断  [Q] 退出' Green
+        Write-TuiText 2 22 '  [S] 开始处理  [K] 原分辨率  [A] 添加  [X] 清空  [F1] 诊断  [Q] 退出' Green
     }
 
     Write-TuiText 2 23 (Pad-Display ('图片分辨率修改工具 ' + $script:ToolVersion + ' · 作者：FANCHUAN · 输出默认命名 原名_宽x高') 76) DarkGray
@@ -774,7 +926,7 @@ function Render-TuiDiag {
         ('终端尺寸   ' + $termSize),
         ('输入重定向 ' + $inputRedirect),
         ('文件数量   ' + $u.Files.Count + ' 个'),
-        ('当前字段   ' + $u.Field + '（0=文件 1=宽 2=高 3=模式 4=目录 5=开始）'),
+        ('当前字段   ' + $u.Field + '（0=文件 1=宽 2=高 3=模式 4=格式 5=目录 6=开始）'),
         ('缩放方式   ' + $ModeLabels[$u.Mode]),
         ('目标尺寸   ' + $u.WidthText + ' x ' + $u.HeightText),
         ('输出目录   ' + $(if ($u.OutDir) { $u.OutDir } else { '默认与原图相同' })),
@@ -798,7 +950,7 @@ function Render-TuiDiag {
 
 function Move-TuiField {
     param([int]$Step)
-    $script:Ui.Field = ($script:Ui.Field + $Step + 6) % 6
+    $script:Ui.Field = ($script:Ui.Field + $Step + 7) % 7
 }
 
 function Start-TuiAdd {
@@ -842,25 +994,37 @@ function Commit-TuiInput {
             $n = 0
             if ([string]::IsNullOrWhiteSpace($text)) {
                 $u.Status = '宽度未修改。'
-            } elseif ([int]::TryParse($text, [ref]$n) -and $n -ge 1 -and $n -le 10000) {
-                $u.WidthText = $n.ToString()
-                $u.Status = '目标宽度已设为 ' + $n + '。'
+            } elseif ([int]::TryParse($text, [ref]$n) -and $n -ge 0 -and $n -le 10000) {
+                if ($n -eq 0) {
+                    $u.KeepSize = $true
+                    $u.Status = '已切换为原分辨率：只转格式，不缩放。'
+                } else {
+                    $u.WidthText = $n.ToString()
+                    $u.KeepSize = $false
+                    $u.Status = '目标宽度已设为 ' + $n + '。'
+                }
             } else {
-                $u.Status = '宽度无效，请输入 1-10000 的整数。'
+                $u.Status = '宽度无效，请输入 0-10000 的整数（0=原分辨率）。'
             }
         }
         2 {
             $n = 0
             if ([string]::IsNullOrWhiteSpace($text)) {
                 $u.Status = '高度未修改。'
-            } elseif ([int]::TryParse($text, [ref]$n) -and $n -ge 1 -and $n -le 10000) {
-                $u.HeightText = $n.ToString()
-                $u.Status = '目标高度已设为 ' + $n + '。'
+            } elseif ([int]::TryParse($text, [ref]$n) -and $n -ge 0 -and $n -le 10000) {
+                if ($n -eq 0) {
+                    $u.KeepSize = $true
+                    $u.Status = '已切换为原分辨率：只转格式，不缩放。'
+                } else {
+                    $u.HeightText = $n.ToString()
+                    $u.KeepSize = $false
+                    $u.Status = '目标高度已设为 ' + $n + '。'
+                }
             } else {
-                $u.Status = '高度无效，请输入 1-10000 的整数。'
+                $u.Status = '高度无效，请输入 0-10000 的整数（0=原分辨率）。'
             }
         }
-        4 {
+        5 {
             $u.OutDir = $text.Trim()
             if ($u.OutDir) {
                 $u.Status = '输出目录：' + $u.OutDir
@@ -905,7 +1069,7 @@ function Handle-TuiInput {
     if ($ch -eq [char]0) { $u.LastKeyMs = $now; return }
     if ($u.Field -eq 1 -or $u.Field -eq 2) {
         if ([char]::IsDigit($ch) -and $u.InputBuffer.Length -lt 5) { $u.InputBuffer += $ch }
-    } elseif ($u.Field -eq 0 -or $u.Field -eq 4) {
+    } elseif ($u.Field -eq 0 -or $u.Field -eq 5) {
         if ($u.InputBuffer.Length -lt 4000) { $u.InputBuffer += $ch }
     }
     $u.LastKeyMs = $now
@@ -916,22 +1080,28 @@ function Activate-TuiField {
     switch ($u.Field) {
         0 { Start-TuiAdd }
         1 {
+            $u.KeepSize = $false
             $u.Editing = $true
-            $u.InputPrompt = '输入目标宽度（1-10000，当前 ' + $u.WidthText + '）'
+            $u.InputPrompt = '输入目标宽度（1-10000，0=原分辨率，当前 ' + $u.WidthText + '）'
             $u.InputBuffer = ''
         }
         2 {
+            $u.KeepSize = $false
             $u.Editing = $true
-            $u.InputPrompt = '输入目标高度（1-10000，当前 ' + $u.HeightText + '）'
+            $u.InputPrompt = '输入目标高度（1-10000，0=原分辨率，当前 ' + $u.HeightText + '）'
             $u.InputBuffer = ''
         }
         3 { $u.Mode = ($u.Mode + 1) % 3 }
         4 {
+            $u.OutFormatIndex = ($u.OutFormatIndex + 1) % $FormatValues.Count
+            $u.Status = '输出格式：' + $FormatLabels[$u.OutFormatIndex] + '。'
+        }
+        5 {
             $u.Editing = $true
             $u.InputPrompt = '输入输出目录（当前 ' + ($(if ($u.OutDir) { $u.OutDir } else { '默认与原图相同' })) + '）'
             $u.InputBuffer = ''
         }
-        5 { $u.Status = '按 S 开始处理。' }
+        6 { $u.Status = '按 S 开始处理。' }
     }
 }
 
@@ -943,13 +1113,16 @@ function Start-TuiProcessing {
     }
     $w = 0
     $h = 0
-    if (-not [int]::TryParse($u.WidthText, [ref]$w) -or -not [int]::TryParse($u.HeightText, [ref]$h)) {
-        $u.Status = '分辨率无效。'
-        return
+    if (-not $u.KeepSize) {
+        if (-not [int]::TryParse($u.WidthText, [ref]$w) -or -not [int]::TryParse($u.HeightText, [ref]$h)) {
+            $u.Status = '分辨率无效。'
+            return
+        }
     }
 
     $modeName = $ModeNames[$u.Mode]
-    $suffix = '_' + $w + 'x' + $h
+    $outputFormat = $FormatValues[$u.OutFormatIndex]
+    $suffix = if ($u.KeepSize) { '' } else { '_' + $w + 'x' + $h }
     $total = $u.Files.Count
     $results = [System.Collections.Generic.List[object]]::new()
     $u.Processing = $true
@@ -963,7 +1136,7 @@ function Start-TuiProcessing {
             $u.SpinIndex++
             Render-TuiProcessing -Title ' 正在处理 ' -Current $i -Total $total -Results $results -CurrentFile $file
             Update-TuiScreen
-            $r = Resize-OneImage -InputPath $file -TargetWidth $w -TargetHeight $h -ResizeMode $modeName -TargetOutDir $u.OutDir -OutputName '' -NameSuffix $suffix -JpegQuality $Quality
+            $r = Resize-OneImage -InputPath $file -TargetWidth $w -TargetHeight $h -ResizeMode $modeName -TargetOutDir $u.OutDir -OutputName '' -NameSuffix $suffix -JpegQuality $Quality -OutputFormat $outputFormat -KeepSize:$($u.KeepSize)
             $results.Add($r)
             if (-not $u.TestMode) {
                 # 让进度条有足够时间被看到（批量大时缩短停留时间）
@@ -1049,8 +1222,18 @@ function Handle-TuiKey {
             }
         }
         'S'          { Start-TuiProcessing }
-        'LeftArrow'  { if ($u.Field -eq 3) { $u.Mode = ($u.Mode + 2) % 3 } }
-        'RightArrow' { if ($u.Field -eq 3) { $u.Mode = ($u.Mode + 1) % 3 } }
+        'K'          {
+            $u.KeepSize = -not $u.KeepSize
+            $u.Status = if ($u.KeepSize) { '原分辨率已开启：只转格式，不缩放。' } else { '原分辨率已关闭。' }
+        }
+        'LeftArrow'  {
+            if ($u.Field -eq 3) { $u.Mode = ($u.Mode + 2) % 3 }
+            elseif ($u.Field -eq 4) { $u.OutFormatIndex = ($u.OutFormatIndex + $FormatValues.Count - 1) % $FormatValues.Count }
+        }
+        'RightArrow' {
+            if ($u.Field -eq 3) { $u.Mode = ($u.Mode + 1) % 3 }
+            elseif ($u.Field -eq 4) { $u.OutFormatIndex = ($u.OutFormatIndex + 1) % $FormatValues.Count }
+        }
         'D1'         { if ($u.Field -eq 3) { $u.Mode = 0 } }
         'D2'         { if ($u.Field -eq 3) { $u.Mode = 1 } }
         'D3'         { if ($u.Field -eq 3) { $u.Mode = 2 } }
@@ -1116,6 +1299,8 @@ function Start-Tui {
         WidthText    = $Width.ToString()
         HeightText   = $Height.ToString()
         Mode         = 0
+        OutFormatIndex = 0
+        KeepSize     = $false
         OutDir       = ''
         Field        = 0
         Editing      = $false
@@ -1313,6 +1498,7 @@ if ($Path.Count -eq 0) {
         Write-Error '-Out 只能用于单张图片。'
         exit 1
     }
-    $code = Invoke-ResizeImages -Files $files -TargetWidth $Width -TargetHeight $Height -ResizeMode $Mode -TargetOutDir $OutDir -OutputName $Out -NameSuffix $Suffix -JpegQuality $Quality
+    if ($Width -eq 0 -or $Height -eq 0) { $KeepSize = $true }
+    $code = Invoke-ResizeImages -Files $files -TargetWidth $Width -TargetHeight $Height -ResizeMode $Mode -TargetOutDir $OutDir -OutputName $Out -NameSuffix $Suffix -JpegQuality $Quality -OutputFormat $Format -KeepSize:$KeepSize
     exit $code
 }

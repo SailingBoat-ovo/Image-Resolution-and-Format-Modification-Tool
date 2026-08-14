@@ -1,24 +1,28 @@
 ﻿# 图片分辨率修改工具（Image Resolution Resizer）
 
-一个**零依赖**的 Windows 小工具：把图片调整成任意分辨率（默认 800×600）。不需要安装 Python、Photoshop 或任何第三方库，只用 Windows 自带的 PowerShell 和 .NET 就能运行。
+一个**零依赖**的 Windows 小工具：把图片调整成任意分辨率（默认 800×600），也支持在 JPG、PNG、BMP、GIF、TIFF、WebP 之间任意互转格式。不需要安装 Python、Photoshop 或任何第三方库，只用 Windows 自带的 PowerShell 和 .NET 就能运行。
 
 - 全屏终端界面（TUI），支持把图片直接拖进窗口
 - 批量处理，支持空格、换行分隔和 `*.jpg` 通配符
 - 三种缩放方式：**居中留白（推荐）**、居中裁剪、拉伸
+- 输出格式任意互转：JPG / PNG / BMP / GIF / TIFF / WebP
 - 也提供命令行模式，方便脚本和批量任务
 - 输出默认命名为 `原名_宽x高.扩展名`，**不会覆盖原图**
 
-作者：FANCHUAN ｜ 当前版本：v2.3 ｜ 许可证：[GPL-3.0-or-later](./LICENSE)
+作者：FANCHUAN ｜ 当前版本：v2.5 ｜ 许可证：[GPL-3.0-or-later](./LICENSE)
 
-支持 JPG、JPEG、PNG、BMP、GIF、TIFF。
+支持 JPG、JPEG、PNG、BMP、GIF、TIFF、WebP。
+
+WebP 既可以作为输入（把 .webp 改成目标分辨率并另存为 .webp），也可以通过 `-Out` 输出为 PNG/JPG 等格式，或把其他格式转成 WebP。WebP 编解码使用随附的 Google libwebp 官方工具（`tools/dwebp.exe`、`tools/cwebp.exe`，BSD 许可，见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）；其余格式仍然零依赖。
 
 ## 快速开始
 
 **方式一：双击启动**
 
+双击 `start.bat`，进入全屏界面后：
 
 1. 按 `A` 添加图片（也可以直接把图片文件拖进窗口）；
-2. 按 `↑` / `↓` 或 `Tab` 切换“文件列表 / 宽度 / 高度 / 缩放方式 / 输出目录 / 开始处理”；
+2. 按 `↑` / `↓` 或 `Tab` 切换“文件列表 / 宽度 / 高度 / 缩放方式 / 输出格式 / 输出目录 / 开始处理”；
 3. 按 `S` 开始处理；
 4. 处理完成后按 `Enter` 返回，或按 `Q` 退出。
 
@@ -39,9 +43,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 ## 界面预览
 
 ```
-┌─  图片分辨率修改工具 v2.3  ─────────────────────────────┐
-│ 图片分辨率修改工具 v2.3                                  │
-│ 将图片调整为目标分辨率 · 作者：FANCHUAN · 输出不会覆盖原图 │
+┌─  图片分辨率修改工具 v2.5  ─────────────────────────────┐
+│ 图片分辨率修改工具 v2.5                                  │
+│ 调整分辨率或转换格式 · 作者：FANCHUAN · 输出不会覆盖原图  │
 └─────────────────────────────────────────────────────────┘
 ┌─ ▶ 文件列表 ─────────────────────────────────────────┐
 │  共 1 个文件                                          │
@@ -51,8 +55,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 ┌─ 处理设置 ────────────────────────────────────────────┐
 │ 目标分辨率  宽度 [ 800 ]  高度 [ 600 ]                 │
 │ 缩放方式   ● 居中留白·推荐 ○ 居中裁剪·不变形 ○ 拉伸·会变形 │
+│ 输出格式   [ 原格式 ]         K 原分辨率:   关          │
 │ 输出目录   [ 默认与原图相同 ]                          │
-│ 操作  ↑↓ 切换项目 · Enter 编辑 · 1/2/3 选模式 · S 开始 · Q 退出 │
+│ 操作  ↑↓ 切换 · Enter 编辑 · ←→ 选模式/格式 · K 原分辨率 · S 开始 · Q 退出 │
 └──────────────────────────────────────────────────────┘
   按 A 添加图片，或把图片拖进窗口；S 开始处理。
   [S] 开始处理  [A] 添加  [X] 清空  [F1] 诊断  [Q] 退出
@@ -62,12 +67,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 
 | 按键 | 作用 |
 | --- | --- |
-| `↑` / `↓` / `Tab` | 在“文件列表 / 宽度 / 高度 / 缩放方式 / 输出目录 / 开始处理”之间切换 |
+| `↑` / `↓` / `Tab` | 在“文件列表 / 宽度 / 高度 / 缩放方式 / 输出格式 / 输出目录 / 开始处理”之间切换 |
 | `Enter` | 编辑 / 确认当前项目 |
 | `A` | 添加图片（任意位置可用；可拖入窗口，或输入/粘贴路径） |
 | `X` | 清空文件列表（按两次确认，防止误触） |
 | `S` | **开始处理**（任意位置可用） |
-| `1` / `2` / `3` 或 `←` / `→` | 选择缩放方式：留白（推荐）/ 裁剪 / 拉伸 |
+| `1` / `2` / `3` 或 `←` / `→` | 在“缩放方式”上选择：留白（推荐）/ 裁剪 / 拉伸；在“输出格式”上按 `←` / `→` 循环切换格式 |
+| `K` | 切换“原分辨率”：开启后只转换格式、不缩放（在宽/高输入 `0` 效果相同） |
 | `F1` | 打开诊断面板（终端尺寸、文件数、最后按键、错误信息等） |
 | `Q` | 退出 |
 
@@ -83,6 +89,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 
 全屏界面和简易菜单的顺序一致：`1 = 居中留白（推荐）`、`2 = 居中裁剪`、`3 = 拉伸`。
 
+## 格式转换
+
+支持在 JPG、PNG、BMP、GIF、TIFF、WebP 之间任意互转：
+
+- 全屏界面：把“输出格式”从 `原格式` 切换为目标格式，再按 `K` 打开“原分辨率”，即可在不改变画面尺寸的情况下纯转换格式；
+- 全屏界面也可以直接在宽/高输入 `0`（界面显示“原分辨率（不缩放）”）；
+- 命令行：`-Format` 指定目标格式，用 `-KeepSize` 或 `-Width 0 -Height 0` 保持原分辨率（不加时仍会缩放到目标宽高）。
+
 ## 命令行模式
 
 给脚本传入图片路径时自动使用命令行模式，不进界面。适合脚本、批处理和自动化任务。
@@ -90,13 +104,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
 | `Path` | 图片路径，可多个、支持通配符；文件夹会递归查找其中的常见图片 | 无 |
-| `-Width` | 目标宽度（1–10000） | 800 |
-| `-Height` | 目标高度（1–10000） | 600 |
+| `-Width` | 目标宽度（0–10000，`0` = 原分辨率） | 800 |
+| `-Height` | 目标高度（0–10000，`0` = 原分辨率） | 600 |
 | `-Mode` | 缩放方式：`cover` / `fit` / `stretch` | `fit` |
+| `-Format` | 输出格式：`jpg` / `jpeg` / `png` / `bmp` / `gif` / `tiff` / `webp` | 保持原格式 |
+| `-KeepSize` | 保持原分辨率，只转换格式 | 关闭 |
 | `-OutDir` | 输出目录 | 与原图相同 |
 | `-Out` | 自定义输出文件名（仅单张图片时有效） | 无 |
 | `-Suffix` | 文件名后缀 | `_宽x高` |
-| `-Quality` | JPEG 质量（1–100） | 92 |
+| `-Quality` | JPEG / WebP 质量（1–100） | 92 |
 
 示例：
 
@@ -109,19 +125,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 
 # 改成 1024x768 且居中裁剪
 .\resize800x600.ps1 照片.jpg -Width 1024 -Height 768 -Mode cover
+
+# 只转格式、不缩放：WebP -> PNG
+.\resize800x600.ps1 照片.webp -Format png -KeepSize
+
+# 等价写法：宽度/高度填 0 即原分辨率
+.\resize800x600.ps1 照片.webp -Format png -Width 0 -Height 0
+
+# 转格式的同时改成 1024x768
+.\resize800x600.ps1 照片.jpg -Format webp -Width 1024 -Height 768
 ```
 
 > 如果终端窗口太小（小于 78×20）或输入被重定向（如管道调用），会自动改用简易问答式菜单，功能相同。
 
-## 测试
+## 测试与调试
 
-仓库自带冒烟测试，覆盖三种缩放方式的输出、自定义尺寸，以及全屏界面中 `S` 开始处理、`Enter` 不再触发处理的行为：
+脚本内置无头测试模式，可以用环境变量模拟按键并输出界面快照，适合验证交互行为：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
+$env:RESIZE_TUI_TEST = 'a,照片.webp,<enter>,s,<enter>,q'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
+Remove-Item Env:\RESIZE_TUI_TEST
 ```
 
-推送后也会通过 [.github/workflows/test.yml](./.github/workflows/test.yml) 在 Windows 上自动运行。
+另外设置 `RESIZE_TOOL_DEBUG=1` 会把按键、状态和错误写入 `resize800x600.log`。
 
 ## 常见问题
 
@@ -136,29 +163,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-tests.ps1
 ```text
 .
 ├── resize800x600.ps1          # 主程序（全屏界面 + 命令行模式）
-├── ImageResizer.bat           # 英文启动器
-├── 图片分辨率修改工具.bat     # 中文启动器
+├── start.bat                  # 双击启动器
+├── tools/
+│   ├── dwebp.exe              # WebP 解码（Google libwebp 1.6.0）
+│   └── cwebp.exe              # WebP 编码（Google libwebp 1.6.0）
 ├── README.md
 ├── LICENSE
 ├── CHANGELOG.md
-├── .gitignore
+├── THIRD_PARTY_NOTICES.md     # 第三方组件许可说明
 ├── docs/
 │   ├── 项目介绍.md            # 从底层到实现的全功能详细介绍（网站文案）
 │   └── 开发与测试.md          # 开发、调试与发布说明
-├── examples/
-│   ├── sample-landscape.png   # 示例图片：横向
-│   ├── sample-portrait.png    # 示例图片：竖向
-│   └── README.md
-├── tests/
-│   └── run-tests.ps1          # 冒烟测试
-└── .github/
-    └── workflows/
-        └── test.yml           # GitHub Actions 自动测试
 ```
 
 ## 环境要求
 
 - Windows 7 及以上（PowerShell 5.1+，Windows 10/11 默认自带）
+- WebP 支持使用随附的 64 位官方工具，需要 64 位 Windows；其他功能无此限制
 - 无需安装任何第三方依赖
 
 ## 许可证
