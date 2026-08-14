@@ -1,4 +1,4 @@
-﻿# 图片分辨率修改工具（Image Resolution Resizer）
+﻿# 图片分辨率和格式修改工具（Image Resolution and Format Modification Tool）
 
 一个**零依赖**的 Windows 小工具：把图片调整成任意分辨率（默认 800×600），也支持在 JPG、PNG、BMP、GIF、TIFF、WebP 之间任意互转格式。不需要安装 Python、Photoshop 或任何第三方库，只用 Windows 自带的 PowerShell 和 .NET 就能运行。
 
