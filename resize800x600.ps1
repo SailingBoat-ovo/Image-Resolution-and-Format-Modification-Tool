@@ -57,7 +57,7 @@ param(
     [ValidateSet('stretch', 'cover', 'fit')]
     [string]$Mode = 'fit',
 
-    [ValidateSet('jpg', 'jpeg', 'png', 'bmp', 'gif', 'tiff', 'webp')]
+    [ValidateSet('jpg', 'jpeg', 'png', 'bmp', 'gif', 'tiff', 'webp', 'ico')]
     [string]$Format = '',
 
     [switch]$KeepSize,
@@ -78,8 +78,8 @@ Set-StrictMode -Version Latest
 
 Add-Type -AssemblyName System.Drawing
 
-$ImageExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.webp')
-$script:ToolVersion = 'v2.5'
+$ImageExtensions = @('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.webp', '.ico')
+$script:ToolVersion = 'v2.6'
 $script:ScriptDir = if ($env:RESIZE_TOOL_DIR) {
     $env:RESIZE_TOOL_DIR.TrimEnd('\')
 } elseif ($PSScriptRoot) {
@@ -398,6 +398,131 @@ function Save-WebpImage {
     }
 }
 
+# ================================================================
+# ICO 支持（纯 System.Drawing 实现，零外部依赖）
+#   读取：解析 ICO 目录，自动选取最大的一帧；PNG 帧直接解码，
+#         DIB 帧重建为单条目 ICO 交给 Icon 类解码（自动处理调色板与 AND 掩码）。
+#   写出：把结果存为 PNG 压缩的单图 ICO（Windows Vista+ 支持），最大 256×256。
+# ================================================================
+
+function Read-IcoImage {
+    param([string]$InputPath)
+    $bytes = [System.IO.File]::ReadAllBytes($InputPath)
+    if ($bytes.Length -lt 22) { throw 'ICO 文件无效（文件太小）。' }
+    $type = [BitConverter]::ToUInt16($bytes, 2)
+    $count = [BitConverter]::ToUInt16($bytes, 4)
+    if ($type -ne 1 -or $count -lt 1) { throw '不是有效的 ICO 图标文件。' }
+
+    # 在目录中挑选“最大”的一帧（宽×高优先，同尺寸再比色彩深度）
+    $bestIndex = -1
+    $bestScore = -1
+    $bestW = 0
+    $bestH = 0
+    $bestSize = 0
+    $bestOffset = 0
+    for ($i = 0; $i -lt $count; $i++) {
+        $off = 6 + $i * 16
+        if ($off + 16 -gt $bytes.Length) { break }
+        $w = [int]$bytes[$off]
+        $h = [int]$bytes[$off + 1]
+        if ($w -eq 0) { $w = 256 }
+        if ($h -eq 0) { $h = 256 }
+        $bitCount = [BitConverter]::ToUInt16($bytes, $off + 6)
+        $size = [BitConverter]::ToUInt32($bytes, $off + 8)
+        $dataOff = [BitConverter]::ToUInt32($bytes, $off + 12)
+        if ($dataOff + $size -gt $bytes.Length) { continue }
+        $score = ($w * $h) * 16 + $bitCount
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $bestIndex = $i
+            $bestW = $w
+            $bestH = $h
+            $bestSize = $size
+            $bestOffset = $dataOff
+        }
+    }
+    if ($bestIndex -lt 0 -or $bestSize -lt 1) { throw 'ICO 文件中没有可用的图像。' }
+
+    $payload = [byte[]]::new($bestSize)
+    [Array]::Copy($bytes, $bestOffset, $payload, 0, $bestSize)
+
+    # PNG 压缩帧：直接解码
+    if ($payload.Length -ge 8 -and $payload[0] -eq 0x89 -and $payload[1] -eq 0x50 -and $payload[2] -eq 0x4E -and $payload[3] -eq 0x47) {
+        $ms = [System.IO.MemoryStream]::new($payload)
+        try {
+            $img = [System.Drawing.Image]::FromStream($ms)
+            $copy = New-Object System.Drawing.Bitmap $img
+            $img.Dispose()
+            return $copy
+        } catch {
+            throw ('ICO 内嵌 PNG 解码失败：' + $_.Exception.Message)
+        } finally {
+            $ms.Dispose()
+        }
+    }
+
+    # DIB 帧：重建一个单条目 ICO，交给 Icon 类解码（自动处理调色板与 AND 掩码）
+    $icoBytes = [byte[]]::new(22 + $bestSize)
+    [Array]::Copy($bytes, 0, $icoBytes, 0, 6)
+    [Array]::Copy([BitConverter]::GetBytes([uint16]1), 0, $icoBytes, 2, 2)   # type = icon
+    [Array]::Copy([BitConverter]::GetBytes([uint16]1), 0, $icoBytes, 4, 2)   # count = 1
+    $entryOff = 6 + $bestIndex * 16
+    [Array]::Copy($bytes, $entryOff, $icoBytes, 6, 12)                       # width..bitCount
+    [Array]::Copy([BitConverter]::GetBytes([uint32]$bestSize), 0, $icoBytes, 14, 4)
+    [Array]::Copy([BitConverter]::GetBytes([uint32]22), 0, $icoBytes, 18, 4) # imageOffset
+    [Array]::Copy($payload, 0, $icoBytes, 22, $bestSize)
+    $ms2 = [System.IO.MemoryStream]::new($icoBytes)
+    try {
+        $icon = [System.Drawing.Icon]::new($ms2, $bestW, $bestH)
+        try {
+            $bmp = $icon.ToBitmap()
+            $icon.Dispose()
+            return $bmp
+        } catch {
+            throw ('ICO 位图帧解码失败：' + $_.Exception.Message)
+        }
+    } finally {
+        $ms2.Dispose()
+    }
+}
+
+function Save-IcoImage {
+    param([System.Drawing.Image]$Image, [string]$OutPath)
+    $w = $Image.Width
+    $h = $Image.Height
+    if ($w -gt 256 -or $h -gt 256) {
+        throw 'ICO 格式最大为 256×256，请把目标宽高设为 256 以内（常见尺寸：16 / 32 / 48 / 64 / 128 / 256）。'
+    }
+    $ms = [System.IO.MemoryStream]::new()
+    try {
+        $Image.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $png = $ms.ToArray()
+    } finally {
+        $ms.Dispose()
+    }
+    $out = [System.IO.MemoryStream]::new()
+    $bw = [System.IO.BinaryWriter]::new($out)
+    try {
+        $bw.Write([uint16]0)                                    # reserved
+        $bw.Write([uint16]1)                                    # type = icon
+        $bw.Write([uint16]1)                                    # 单图 ICO
+        $bw.Write([byte]$(if ($w -ge 256) { 0 } else { $w }))   # width（0 表示 256）
+        $bw.Write([byte]$(if ($h -ge 256) { 0 } else { $h }))   # height（0 表示 256）
+        $bw.Write([byte]0)                                      # 调色板数（PNG 帧为 0）
+        $bw.Write([byte]0)                                      # reserved
+        $bw.Write([uint16]1)                                    # planes
+        $bw.Write([uint16]32)                                   # bitCount
+        $bw.Write([uint32]$png.Length)                          # bytesInRes
+        $bw.Write([uint32]22)                                   # imageOffset
+        $bw.Write($png)                                         # PNG 压缩图像数据
+        $bw.Flush()
+        [System.IO.File]::WriteAllBytes($OutPath, $out.ToArray())
+    } finally {
+        $bw.Dispose()
+        $out.Dispose()
+    }
+}
+
 function Resize-OneImage {
     param(
         [string]$InputPath,
@@ -428,6 +553,8 @@ function Resize-OneImage {
         $inputExt = [System.IO.Path]::GetExtension($InputPath).ToLowerInvariant()
         if ($inputExt -eq '.webp') {
             $src = Read-WebpImage -InputPath $InputPath
+        } elseif ($inputExt -eq '.ico') {
+            $src = Read-IcoImage -InputPath $InputPath
         } else {
             $src = [System.Drawing.Image]::FromFile($InputPath)
             Invoke-ExifOrientation $src
@@ -503,6 +630,8 @@ function Resize-OneImage {
         $outExt = [System.IO.Path]::GetExtension($outPath).ToLowerInvariant()
         if ($outExt -eq '.webp') {
             Save-WebpImage -Image $dst -OutPath $outPath -Quality $JpegQuality
+        } elseif ($outExt -eq '.ico') {
+            Save-IcoImage -Image $dst -OutPath $outPath
         } elseif ($outExt -in '.jpg', '.jpeg') {
             $codec = @([System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' })[0]
             $ep = [System.Drawing.Imaging.EncoderParameters]::new(1)
@@ -617,9 +746,9 @@ function Read-OutputFormat {
     Write-Host ''
     Write-Host '输出格式（可把任意支持格式转成目标格式）：'
     Write-Host '  0) 保持原格式'
-    Write-Host '  1) JPG   2) PNG   3) BMP   4) GIF   5) TIFF   6) WEBP'
+    Write-Host '  1) JPG   2) PNG   3) BMP   4) GIF   5) TIFF   6) WEBP   7) ICO'
     while ($true) {
-        $answer = Read-Host '请输入 0 到 6 [默认 0 = 保持原格式]'
+        $answer = Read-Host '请输入 0 到 7 [默认 0 = 保持原格式]'
         switch ($answer) {
             ''  { return '' }
             '0' { return '' }
@@ -629,7 +758,8 @@ function Read-OutputFormat {
             '4' { return 'gif' }
             '5' { return 'tiff' }
             '6' { return 'webp' }
-            default { Write-Host '请输入 0 到 6。' -ForegroundColor Yellow }
+            '7' { return 'ico' }
+            default { Write-Host '请输入 0 到 7。' -ForegroundColor Yellow }
         }
     }
 }
@@ -659,7 +789,7 @@ function Show-SimpleMenu {
                     }
             )
         } else {
-            $tokens = @('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif', '*.tif', '*.tiff', '*.webp')
+            $tokens = @('*.jpg', '*.jpeg', '*.png', '*.bmp', '*.gif', '*.tif', '*.tiff', '*.webp', '*.ico')
         }
 
         $files = @(Resolve-ImageFiles -RawPaths $tokens)
@@ -725,35 +855,37 @@ function Show-SimpleMenu {
 
 $ModeLabels = @('居中留白·推荐', '居中裁剪·不变形', '拉伸·会变形')
 $ModeNames = @('fit', 'cover', 'stretch')
-$FormatLabels = @('原格式', 'JPG', 'PNG', 'BMP', 'GIF', 'TIFF', 'WEBP')
-$FormatValues = @('', 'jpg', 'png', 'bmp', 'gif', 'tiff', 'webp')
+$FormatLabels = @('原格式', 'JPG', 'PNG', 'BMP', 'GIF', 'TIFF', 'WEBP', 'ICO')
+$FormatValues = @('', 'jpg', 'png', 'bmp', 'gif', 'tiff', 'webp', 'ico')
 
 function Render-Tui {
     Reset-TuiGrid
     $u = $script:Ui
 
-    # ---- 标题区 ----
-    Draw-TuiBox 0 0 80 4 (' 图片分辨率修改工具 ' + $script:ToolVersion + ' ') Cyan
-    Write-TuiText 2 1 (Pad-Display ('图片分辨率修改工具 ' + $script:ToolVersion) 76) White
-    Write-TuiText 2 2 (Pad-Display '调整分辨率或转换格式 · 作者：FANCHUAN · 输出不会覆盖原图' 76) DarkCyan
+    # ---- 标题区（含新手教程） ----
+    Draw-TuiBox 0 0 80 6 (' 使用教程 · 图片分辨率修改工具 ' + $script:ToolVersion + ' ') Cyan
+    Write-TuiText 2 1 (Pad-Display '① 添加图片：按 A，或把图片直接拖进窗口（支持多张 / 通配符）' 76) White
+    Write-TuiText 2 2 (Pad-Display '② 设置参数：↑↓ 选择项目，Enter 编辑；←→ 或 1/2/3 选缩放方式' 76) Cyan
+    Write-TuiText 2 3 (Pad-Display '③ 输出格式：←→ 循环切换；K 切换原分辨率（只转格式不缩放）' 76) Cyan
+    Write-TuiText 2 4 (Pad-Display '④ 开始：按 S 处理，完成按 Enter 返回；X 清空 · F1 诊断 · Q 退出' 76) Cyan
 
     # ---- 文件列表 ----
     $filesActive = ($u.Field -eq 0)
     $filesTitle = if ($filesActive) { '▶ 文件列表' } else { '  文件列表' }
     $filesColor = if ($filesActive) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Cyan }
-    Draw-TuiBox 0 5 80 9 $filesTitle $filesColor
+    Draw-TuiBox 0 6 80 8 $filesTitle $filesColor
 
     $countText = '共 ' + $u.Files.Count + ' 个文件'
-    Write-TuiText (78 - (Get-DisplayWidth $countText)) 6 $countText DarkGray
+    Write-TuiText (78 - (Get-DisplayWidth $countText)) 7 $countText DarkGray
 
     if ($u.Files.Count -eq 0) {
-        Write-TuiText 2 8 '（空）按 A 添加图片，或把图片直接拖进窗口' DarkGray
+        Write-TuiText 2 9 '（空）按 A 添加图片，或把图片直接拖进窗口' DarkGray
     } else {
-        $maxRows = 5
+        $maxRows = 4
         for ($i = 0; $i -lt [Math]::Min($maxRows, $u.Files.Count); $i++) {
             $name = $u.Files[$i]
             if ((Get-DisplayWidth $name) -gt 66) { $name = Truncate-Display $name 66 }
-            Write-TuiText 2 (7 + $i) ('  ' + ($i + 1) + '. ' + $name) Gray
+            Write-TuiText 2 (8 + $i) ('  ' + ($i + 1) + '. ' + $name) Gray
         }
     }
     Write-TuiText 2 12 '  [A] 添加图片    [X] 清空列表' Yellow

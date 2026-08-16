@@ -1,19 +1,21 @@
-﻿# 图片分辨率和格式修改工具（Image Resolution and Format Modification Tool）
+# 图片分辨率修改工具（Image Resolution Resizer）
 
-一个**零依赖**的 Windows 小工具：把图片调整成任意分辨率（默认 800×600），也支持在 JPG、PNG、BMP、GIF、TIFF、WebP 之间任意互转格式。不需要安装 Python、Photoshop 或任何第三方库，只用 Windows 自带的 PowerShell 和 .NET 就能运行。
+一个**零依赖**的 Windows 小工具：把图片调整成任意分辨率（默认 800×600），也支持在 JPG、PNG、BMP、GIF、TIFF、WebP、ICO 之间任意互转格式。不需要安装 Python、Photoshop 或任何第三方库，只用 Windows 自带的 PowerShell 和 .NET 就能运行。
 
 - 全屏终端界面（TUI），支持把图片直接拖进窗口
 - 批量处理，支持空格、换行分隔和 `*.jpg` 通配符
 - 三种缩放方式：**居中留白（推荐）**、居中裁剪、拉伸
-- 输出格式任意互转：JPG / PNG / BMP / GIF / TIFF / WebP
+- 输出格式任意互转：JPG / PNG / BMP / GIF / TIFF / WebP / ICO
 - 也提供命令行模式，方便脚本和批量任务
 - 输出默认命名为 `原名_宽x高.扩展名`，**不会覆盖原图**
 
-作者：FANCHUAN ｜ 当前版本：v2.5 ｜ 许可证：[GPL-3.0-or-later](./LICENSE)
+作者：FANCHUAN ｜ 当前版本：v2.6 ｜ 许可证：[GPL-3.0-or-later](./LICENSE)
 
-支持 JPG、JPEG、PNG、BMP、GIF、TIFF、WebP。
+支持 JPG、JPEG、PNG、BMP、GIF、TIFF、WebP、ICO。
 
 WebP 既可以作为输入（把 .webp 改成目标分辨率并另存为 .webp），也可以通过 `-Out` 输出为 PNG/JPG 等格式，或把其他格式转成 WebP。WebP 编解码使用随附的 Google libwebp 官方工具（`tools/dwebp.exe`、`tools/cwebp.exe`，BSD 许可，见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）；其余格式仍然零依赖。
+
+ICO 是 Windows 图标格式，同样**零依赖**、全功能支持：作为输入时自动选取文件里最大的一帧（PNG 帧与经典 DIB 帧都能解码，含调色板与透明掩码）；作为输出时生成 PNG 压缩的单图 ICO（Windows Vista 及以上可用），最大 256×256，超过会给出明确报错提示；与其它格式一致，透明背景会落在白色画布上。
 
 ## 快速开始
 
@@ -43,10 +45,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 ## 界面预览
 
 ```
-┌─  图片分辨率修改工具 v2.5  ─────────────────────────────┐
-│ 图片分辨率修改工具 v2.5                                  │
-│ 调整分辨率或转换格式 · 作者：FANCHUAN · 输出不会覆盖原图  │
-└─────────────────────────────────────────────────────────┘
+┌─  使用教程 · 图片分辨率修改工具 v2.6  ───────────────────┐
+│ ① 添加图片：按 A，或把图片直接拖进窗口（支持多张 / 通配符）│
+│ ② 设置参数：↑↓ 选择项目，Enter 编辑；←→ 或 1/2/3 选缩放方式│
+│ ③ 输出格式：←→ 循环切换；K 切换原分辨率（只转格式不缩放）  │
+│ ④ 开始：按 S 处理，完成按 Enter 返回；X 清空·F1 诊断·Q 退出│
+└──────────────────────────────────────────────────────────┘
 ┌─ ▶ 文件列表 ─────────────────────────────────────────┐
 │  共 1 个文件                                          │
 │   1. C:\照片\照片1.jpg                                │
@@ -91,7 +95,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 
 ## 格式转换
 
-支持在 JPG、PNG、BMP、GIF、TIFF、WebP 之间任意互转：
+支持在 JPG、PNG、BMP、GIF、TIFF、WebP、ICO 之间任意互转：
 
 - 全屏界面：把“输出格式”从 `原格式` 切换为目标格式，再按 `K` 打开“原分辨率”，即可在不改变画面尺寸的情况下纯转换格式；
 - 全屏界面也可以直接在宽/高输入 `0`（界面显示“原分辨率（不缩放）”）；
@@ -107,7 +111,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 | `-Width` | 目标宽度（0–10000，`0` = 原分辨率） | 800 |
 | `-Height` | 目标高度（0–10000，`0` = 原分辨率） | 600 |
 | `-Mode` | 缩放方式：`cover` / `fit` / `stretch` | `fit` |
-| `-Format` | 输出格式：`jpg` / `jpeg` / `png` / `bmp` / `gif` / `tiff` / `webp` | 保持原格式 |
+| `-Format` | 输出格式：`jpg` / `jpeg` / `png` / `bmp` / `gif` / `tiff` / `webp` / `ico` | 保持原格式 |
 | `-KeepSize` | 保持原分辨率，只转换格式 | 关闭 |
 | `-OutDir` | 输出目录 | 与原图相同 |
 | `-Out` | 自定义输出文件名（仅单张图片时有效） | 无 |
@@ -134,6 +138,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\resize800x600.ps1
 
 # 转格式的同时改成 1024x768
 .\resize800x600.ps1 照片.jpg -Format webp -Width 1024 -Height 768
+
+# 输出为 Windows 图标（ICO 最大 256x256，常见尺寸 16/32/48/64/128/256）
+.\resize800x600.ps1 照片.png -Format ico -Width 256 -Height 256
+
+# 把 .ico 图标转成 PNG（自动读取其中最大的一帧）
+.\resize800x600.ps1 图标.ico -Format png -Width 128 -Height 128
 ```
 
 > 如果终端窗口太小（小于 78×20）或输入被重定向（如管道调用），会自动改用简易问答式菜单，功能相同。
